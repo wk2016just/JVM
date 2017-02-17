@@ -1,0 +1,67 @@
+public class Bar {
+    int a = 1;
+    static int b = 2;
+
+    public int sum(int c) {
+        return a + b + c;
+    }
+
+    public static void main(String[] args) {
+        new Bar().sum(3);
+    }
+}
+
+>java -XX:+PrintAssembly -Xcomp -XX:CompileCommand=dontinline,*Bar.sum -XX:CompileCommand=compileonly,*Bar.sum test.Bar
+[Disassembling for mach='i386']
+[Entry Point]
+[Constants]
+  # {method} 'sum' '(I)I' in 'test/Bar'
+  # this:     ecx       = 'test/Bar'
+  # parm0:    edx       = int
+  #           [sp+0x20]  (sp of caller)
+  ……
+  0x01cac407: cmp    0x4(%ecx),%eax
+  0x01cac40a: jne    0x01c6b050         ;   {runtime_call}
+[Verified Entry Point]
+  0x01cac410: mov    %eax,-0x8000(%esp)
+  0x01cac417: push   %ebp
+  0x01cac418: sub    $0x18,%esp         ;*aload_0
+                                        ; - test.Bar::sum@0 (line  8)
+  ;;  block B0 [0, 10]
+
+  0x01cac41b: mov    0x8(%ecx),%eax     ;*getfield a
+                                        ; - test.Bar::sum@1 (line 8)
+  0x01cac41e: mov    $0x3d2fad8,%esi    ;   {oop(a 
+'java/lang/Class' = 'test/Bar')}
+  0x01cac423: mov    0x68(%esi),%esi    ;*getstatic b
+                                        ; - test.Bar::sum@4 (line 8)
+  0x01cac426: add    %esi,%eax
+  0x01cac428: add    %edx,%eax
+  0x01cac42a: add    $0x18,%esp
+  0x01cac42d: pop    %ebp
+  0x01cac42e: test   %eax,0x2b0100      ;   {poll_return}
+  0x01cac434: ret   
+
+代码并不多，一句一句来看：
+
+    mov %eax,-0x8000(%esp)：检查栈溢。
+    push %ebp：保存上一栈帧基址。
+    sub $0x18,%esp：给新帧分配空间。
+    mov 0x8(%ecx),%eax：取实例变量a，这里0x8(%ecx)就是ecx+0x8的意思，前面“[Constants]”节中提示了“this:ecx = 'test/Bar'”，即ecx寄存器中放的就是this对象的地址。偏移0x8是越过this对象的对象头，之后就是实例变量a的内存位置。这次是访问“Java堆”中的数据。
+    mov $0x3d2fad8,%esi：取test.Bar在方法区的指针。
+    mov 0x68(%esi),%esi：取类变量b，这次是访问“方法区”中的数据。
+    add %esi,%eax 、add %edx,%eax：做2次加法，求a+b+c的值，前面的代码把a放在eax中，把b放在esi中，而c在[Constants]中提示了，“parm0:edx = int”，说明c在edx中。
+    add $0x18,%esp：撤销栈帧。
+    pop %ebp：恢复上一栈帧。
+    test %eax,0x2b0100：轮询方法返回处的SafePoint
+    ret：方法返回。
+
+
+从汇编代码中可见，访问Java堆、栈和方法区中的数据，都是直接访问某个内存地址或者寄存器，
+之间并没有看见有什么隔阂。HotSpot虚拟机本身是一个运行在物理机器上的程序，Java堆、栈、方法区都在Java虚拟机进程的内存中分配。
+在JIT编译之后，Native Code面向的是HotSpot这个进程的内存，说变量a还在Java Heap中，
+应当理解为a的位置还在原来的那个内存位置上，但是Native Code是不理会Java Heap之类的概念的，因为那并不是同一个层次的概念。
+
+
+
+
